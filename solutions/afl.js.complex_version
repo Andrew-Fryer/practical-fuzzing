@@ -1,0 +1,99 @@
+const dummy_api = {
+    print: console.log,
+    setInMemoryFuzzing: () => {},
+    done: () => {},
+};
+// const Afl = dummy_api;
+console.log = Afl.print;
+
+const dummy_file_path = "dummy_input_file.txt";
+
+const fopen_fn_addr = Module.findExportByName(null, 'fopen');
+Interceptor.attach(ptr(fopen_fn_addr), {
+    onEnter(args) {
+        console.log('considering ' + args[0].readUtf8String() + ' and in state ' + app_state);
+        if(args[0].readUtf8String().includes(dummy_file_path)) {
+            console.log('...and it matches!');
+            app_state = state_2;
+        }
+    },
+});
+
+const read_fn_addr = Module.findExportByName(null, 'read');
+Afl.print('read_fn_addr: ' + read_fn_addr);
+const read_fn = new NativeFunction(read_fn_addr, 'int', ['int', 'pointer', 'int']);
+Interceptor.replace(ptr(read_fn_addr), new NativeCallback((fd, buf, size) => {
+    console.log('read called with ' + fd + ', ' + buf + ', ' + size + ' ... and in state: ' + app_state);
+    if(fd === 198 || app_state === state_0 && fd !== 0) {
+        // this must be AFL using the read fn
+        // So, call the actual read fn
+        console.log('Calling through to real read fn');
+        return read_fn(fd, buf, size);
+    }
+    if(app_state === state_0 && fd === 0) {
+        Afl.print('writing \'1\'');
+        buf.add(0).writeU8(0x31); // '1'
+        buf.add(1).writeU8(0x0A); // NL
+        buf.add(2).writeU8(0x00); // NULL
+        app_state = state_1;
+        return 2;
+    } else if(app_state === state_1 && fd === 0) {
+        // reading the file path, which doesn't really matter
+        const dummy_file_path_line = "./" + dummy_file_path + "\n";
+        Afl.print('writing <dummy path>');
+        buf.writeUtf8String(dummy_file_path_line);
+        app_state = state_1b;
+        return dummy_file_path_line.length;
+    } else if(app_state === state_3 && fd === 0) {
+        Afl.print('writing \'2\'');
+        buf.add(0).writeU8(0x32); // '2'
+        buf.add(1).writeU8(0x0A); // NL
+        buf.add(2).writeU8(0x00); // NULL
+        app_state = state_4;
+        return 2;
+    } else {
+        Afl.print('WAT WAT WAT');
+    }
+}, 'int', ['int', 'pointer', 'int']));
+
+const fread_fn_addr = Module.findExportByName(null, 'fread');
+Afl.print('fread_fn_addr: ' + fread_fn_addr);
+const fread_fn = new NativeFunction(fread_fn_addr, 'int', ['pointer', 'int', 'int', 'pointer']);
+Interceptor.replace(ptr(fread_fn_addr), new NativeCallback((buf, size, nitems, file) => {
+    if(app_state === state_2) {
+        // we must be reading in the file data that will be parsed
+        Afl.print('about to write actual data');
+        const afl_fuzz_len_ptr = Afl.getAflFuzzLen().readPointer();
+        const afl_fuzz_len = afl_fuzz_len_ptr.readU32();
+        const data_len = Afl.getAflFuzzLen().readInt();
+        Afl.print("I'm here " + data_len + " | " + afl_fuzz_len);
+        const afl_fuzz_ptr = Afl.getAflFuzzPtr().readPointer();
+        Afl.print("I'm here 2 " + afl_fuzz_ptr);
+        const data = afl_fuzz_ptr.readByteArray(afl_fuzz_len);
+        Afl.print('writing data ' + new Uint8Array(data));
+        buf.writeByteArray(data);
+        Afl.print('wrote data')
+        app_state = state_3;
+        return data_len;
+    } else {
+        Afl.print("calling through to fread");
+        return fread_fn(buf, size, nitems, file);
+    }
+}, 'int', ['pointer', 'int', 'int', 'pointer']));
+
+Afl.setInMemoryFuzzing();
+
+const license_check_addr = 0x4012b6; // find this by examining code in IDA
+Interceptor.attach(ptr(license_check_addr), {
+    onLeave(retval) {
+        retval.replace(0x01);
+    },
+});
+
+const usage_fn_addr = 0x401347;
+const get_line_fn_addr = 0x4013a5;
+const main_fn_addr = 0x401463;
+const parse_fn_addr = 0x40174a;
+
+Afl.print('at end of script');
+Afl.done();
